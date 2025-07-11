@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team Schedule Generator</title>
+    <!-- Tailwind CSS for beautiful styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter font for a clean look -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        /* Custom styles to ensure the Inter font is used */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <!-- This is where our React app will live! -->
+    <div id="root"></div>
+
+    <!-- React and ReactDOM libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for transforming JSX (React's special syntax) -->
+    <script src="https://unpkg.com/@babel/standalone@7.28.0/babel.min.js"></script>
+
+    <!-- Now, we link to our separate JavaScript file! -->
+    <!-- The type="text/babel" and data-presets="react" tell Babel to process this file -->
+    <script type="text/babel" data-presets="react" src="app.js"></script>
+</body>
+</html>
