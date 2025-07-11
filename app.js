@@ -20,6 +20,12 @@ function App() {
   const [memberToMove, setMemberToMove] = React.useState(null); // { name: string, fromSlotId: string }
   const [moveError, setMoveError] = React.useState('');
 
+  // State for Add Person Popup
+  const [showAddPersonPopup, setShowAddPersonPopup] = React.useState(false);
+  const [popupTargetSlotId, setPopupTargetSlotId] = React.useState(null);
+  const [selectedPersonForAdd, setSelectedPersonForAdd] = React.useState('');
+  const [addPersonError, setAddPersonError] = React.useState('');
+
 
   // New state for shift time setup and max hours limit
   const [shiftStartTime, setShiftStartTime] = React.useState(null); // Stores hour (e.g., 9 for 9 AM)
@@ -35,6 +41,14 @@ function App() {
   const [meetingEndTime, setMeetingEndTime] = React.useState('');   // Stored as 'HHMM' string
   const [peoplePerShift, setPeoplePerShift] = React.useState(1);
   const [requireOverlap, setRequireOverlap] = React.useState(false);
+
+  // Predefined distinct colors for team members
+  const memberColors = React.useMemo(() => [
+    '#FFADAD', '#FFD6A5', '#FDFFB6', '#CAFFBF', '#9BF6FF',
+    '#A0C4FF', '#BDB2FF', '#FFC6FF', '#FFFFFC', '#FFABAB',
+    '#FFC3A0', '#FFE0B0', '#D6FFB8', '#B7E4F0', '#A7D9FF'
+  ], []);
+  const colorIndex = React.useRef(0); // To cycle through colors
 
   // Define all possible 30-minute time slots based on user-defined start/end times
   const allPossibleSlots = React.useMemo(() => {
@@ -160,9 +174,13 @@ function App() {
     // Filter out global restricted slots from initial availability
     const finalAvailability = availableSlots.filter(slotId => !globalRestrictedSlots.includes(slotId));
 
+    // Assign a unique color
+    const assignedColor = memberColors[colorIndex.current % memberColors.length];
+    colorIndex.current++;
+
     // Convert available slots array to a comma-separated string for storage
     const availabilityString = finalAvailability.join(',');
-    setTeamMembers([...teamMembers, { name: newMemberName, availability: availabilityString }]);
+    setTeamMembers([...teamMembers, { name: newMemberName, availability: availabilityString, color: assignedColor }]);
     setNewMemberName(''); // Clear the input field after adding
     setSelectedBusySlots([]); // Clear selected busy slots for the next member
   };
@@ -246,7 +264,7 @@ function App() {
             }
         }
 
-        if (mostFrequentTimeId && maxFrequency > 1) {
+        if (mostFrequentTimeId) { // Suggest even if only assigned once, if it's their only assignment
             const suggestedTimeSlot = allPossibleSlots.find(s => s.timeId === mostFrequentTimeId);
             if (suggestedTimeSlot) {
                 consistentTimeSuggestions[member.name] = suggestedTimeSlot.display;
@@ -276,8 +294,8 @@ function App() {
         assignments[slot.id] = [];
     });
 
-    const memberShiftCounts = {};
-    const memberDailyAssignments = {};
+    const memberShiftCounts = {}; // Total 30-min slots assigned
+    const memberDailyAssignments = {}; // Tracks if a member has been assigned a slot on a given day
     teamMembers.forEach(member => {
       memberShiftCounts[member.name] = 0;
       memberDailyAssignments[member.name] = { mon: false, tue: false, wed: false, thu: false, fri: false };
@@ -295,68 +313,63 @@ function App() {
         .filter(slotId => !globalRestrictedSlots.includes(slotId))
     }));
 
-    // --- Phase 1: Prioritize Daily Coverage (One slot per day per person) ---
-    const daysOfWeek = ['mon', 'tue', 'wed', 'thu', 'fri'];
-    daysOfWeek.forEach(day => {
-        membersWithParsedAvailability.forEach(member => {
-            if (!memberDailyAssignments[member.name][day]) {
-                const availableSlotOnDay = allPossibleSlots.find(slot =>
-                    slot.dayId === day &&
-                    member.parsedAvailability.includes(slot.id) &&
-                    assignments[slot.id].length < peoplePerShift &&
-                    (memberShiftCounts[member.name] * 0.5) + 0.5 <= parsedMaxHoursLimit
-                );
-
-                if (availableSlotOnDay) {
-                    assignments[availableSlotOnDay.id].push(member.name);
-                    memberShiftCounts[member.name]++;
-                    memberDailyAssignments[member.name][day] = true;
-                }
-            }
-        });
-    });
-
-    // --- Phase 2: Fill Remaining Slots (Fairness & Overlap - Strictly respecting max hours) ---
+    // Iterate through all possible shifts (time slot by time slot)
     allPossibleSlots.forEach(shift => {
       if (globalRestrictedSlots.includes(shift.id)) {
-          return;
+          return; // Skip this shift, it's restricted for everyone
       }
 
-      while (assignments[shift.id].length < peoplePerShift) {
-          let lastAssignedMemberForOverlap = null;
-          if (requireOverlap && peoplePerShift === 1) {
-              const currentSlotIndex = allPossibleSlots.findIndex(s => s.id === shift.id);
-              if (currentSlotIndex > 0) {
-                  const previousSlot = allPossibleSlots[currentSlotIndex - 1];
-                  if (previousSlot.dayId === shift.dayId && assignments[previousSlot.id] && assignments[previousSlot.id].length > 0) {
-                      lastAssignedMemberForOverlap = assignments[previousSlot.id][0];
-                  }
+      // Determine last assigned member for overlap logic if applicable
+      let lastAssignedMemberForOverlap = null;
+      if (requireOverlap && peoplePerShift === 1) {
+          const currentSlotIndex = allPossibleSlots.findIndex(s => s.id === shift.id);
+          if (currentSlotIndex > 0) {
+              const previousSlot = allPossibleSlots[currentSlotIndex - 1];
+              // Check if it's the same day and if the previous slot was assigned
+              if (previousSlot.dayId === shift.dayId && assignments[previousSlot.id] && assignments[previousSlot.id].length > 0) {
+                  lastAssignedMemberForOverlap = assignments[previousSlot.id][0];
               }
           }
+      }
 
-          const availableForShiftStrict = membersWithParsedAvailability.filter(member => {
+      // Loop to assign 'peoplePerShift' number of people to the current slot
+      while (assignments[shift.id].length < peoplePerShift) {
+          const availableForShift = membersWithParsedAvailability.filter(member => {
             const currentHours = memberShiftCounts[member.name] * 0.5;
             return member.parsedAvailability.includes(shift.id) &&
-                   (currentHours + 0.5 <= parsedMaxHoursLimit) &&
-                   !assignments[shift.id].includes(member.name);
+                   (currentHours + 0.5 <= parsedMaxHoursLimit) && // Strict max hours check
+                   !assignments[shift.id].includes(member.name); // Not already assigned to this specific slot
           });
 
-          if (availableForShiftStrict.length > 0) {
-            availableForShiftStrict.sort((a, b) => {
+          if (availableForShift.length > 0) {
+            availableForShift.sort((a, b) => {
+                // 1. Prioritize members who haven't worked this day yet (strongest preference)
+                const aWorkedToday = memberDailyAssignments[a.name][shift.dayId];
+                const bWorkedToday = memberDailyAssignments[b.name][shift.dayId];
+
+                if (!aWorkedToday && bWorkedToday) return -1; // a is better (hasn't worked today)
+                if (aWorkedToday && !bWorkedToday) return 1;  // b is better (hasn't worked today)
+
+                // 2. Fairness: Prefer fewer total assigned shifts
                 const aCount = memberShiftCounts[a.name];
                 const bCount = memberShiftCounts[b.name];
+                if (aCount !== bCount) return aCount - bCount;
+
+                // 3. Overlap (if applicable, for single shifts): Penalize if just worked previous slot
                 if (requireOverlap && peoplePerShift === 1 && lastAssignedMemberForOverlap) {
-                    const aPenalty = (a.name === lastAssignedMemberForOverlap) ? 100 : 0;
-                    const bPenalty = (b.name === lastAssignedMemberForOverlap) ? 100 : 0;
-                    if (aCount + aPenalty !== bCount + bPenalty) {
-                        return (aCount + aPenalty) - (bCount + bPenalty);
-                    }
+                    const aPenaltyOverlap = (a.name === lastAssignedMemberForOverlap) ? 100 : 0; // Large penalty to strongly discourage
+                    const bPenaltyOverlap = (b.name === lastAssignedMemberForOverlap) ? 100 : 0;
+                    if (aPenaltyOverlap !== bPenaltyOverlap) return aPenaltyOverlap - bPenaltyOverlap;
                 }
-                return aCount - bCount;
+
+                // 4. Random Tie-breaker: If all else is equal, randomize
+                return Math.random() - 0.5;
             });
-            const assignedMember = availableForShiftStrict[0];
+
+            const assignedMember = availableForShift[0];
             assignments[shift.id].push(assignedMember.name);
             memberShiftCounts[assignedMember.name]++;
+            memberDailyAssignments[assignedMember.name][shift.dayId] = true; // Mark day as worked
           } else {
               break;
           }
@@ -371,6 +384,7 @@ function App() {
   const handleMoveStart = (memberName, fromSlotId) => {
     setMemberToMove({ name: memberName, fromSlotId: fromSlotId });
     setMoveError(''); // Clear any previous move errors
+    setShowAddPersonPopup(false); // Close add popup if open
   };
 
   const handleCancelMove = () => {
@@ -462,6 +476,104 @@ function App() {
     calculateAndSetScheduleDisplayData(updatedAssignments); // Recalculate display data
     setMemberToMove(null); // Clear moving state
     setMoveError(''); // Clear error
+  };
+
+
+  // --- Add Person Popup Logic ---
+  const handleCellClickForAdd = (slotId) => {
+    if (memberToMove) return; // Don't open popup if in move mode
+    setPopupTargetSlotId(slotId);
+    setShowAddPersonPopup(true);
+    setAddPersonError(''); // Clear previous errors
+    setSelectedPersonForAdd(''); // Reset dropdown
+  };
+
+  const handleAddPersonToSlot = () => {
+    if (!selectedPersonForAdd || !popupTargetSlotId) {
+        setAddPersonError("Please select a person.");
+        return;
+    }
+
+    const memberName = selectedPersonForAdd;
+    const targetSlotId = popupTargetSlotId;
+    const parsedMaxHoursLimit = parseFloat(maxHoursLimit);
+
+    // 1. Get the member's current availability (excluding global restrictions)
+    const member = teamMembers.find(m => m.name === memberName);
+    if (!member) {
+        setAddPersonError("Error: Selected member not found.");
+        return;
+    }
+    const memberParsedAvailability = member.availability
+        .toLowerCase()
+        .split(',')
+        .map(item => item.trim())
+        .filter(item => item !== '')
+        .filter(slotId => !globalRestrictedSlots.includes(slotId));
+
+    // 2. Validate the assignment
+    if (globalRestrictedSlots.includes(targetSlotId)) {
+        setAddPersonError("Cannot assign to a globally restricted time slot (Devotional/Meeting).");
+        return;
+    }
+    if (!memberParsedAvailability.includes(targetSlotId)) {
+        setAddPersonError(`${memberName} is not available during the selected time.`);
+        return;
+    }
+
+    // Check if member is already in this slot
+    if (currentAssignments[targetSlotId] && currentAssignments[targetSlotId].includes(memberName)) {
+        setAddPersonError(`${memberName} is already assigned to this slot.`);
+        return;
+    }
+
+    // Temporarily calculate hours if added, to check against max limit
+    const tempAssignments = { ...currentAssignments };
+    tempAssignments[targetSlotId] = [...(tempAssignments[targetSlotId] || []), memberName];
+
+    let newMemberHours = 0;
+    for (const slotId in tempAssignments) {
+        if (tempAssignments[slotId].includes(memberName)) {
+            newMemberHours += 0.5;
+        }
+    }
+
+    if (newMemberHours > parsedMaxHoursLimit) {
+        setAddPersonError(`${memberName} would exceed the maximum hours limit (${parsedMaxHoursLimit} hours) with this assignment.`);
+        return;
+    }
+
+    // Check if target slot is already full
+    if (tempAssignments[targetSlotId].length > peoplePerShift) {
+        setAddPersonError(`The target slot is already full (${peoplePerShift} people).`);
+        return;
+    }
+
+    // 3. Perform the assignment
+    const updatedAssignments = { ...currentAssignments };
+    updatedAssignments[targetSlotId] = [...(updatedAssignments[targetSlotId] || []), memberName];
+
+    setCurrentAssignments(updatedAssignments);
+    calculateAndSetScheduleDisplayData(updatedAssignments);
+    setShowAddPersonPopup(false); // Close popup
+    setPopupTargetSlotId(null);
+    setSelectedPersonForAdd('');
+    setAddPersonError('');
+  };
+
+  const handleRemovePersonFromSlot = (memberName, slotId) => {
+    const updatedAssignments = { ...currentAssignments };
+    updatedAssignments[slotId] = updatedAssignments[slotId].filter(name => name !== memberName);
+
+    setCurrentAssignments(updatedAssignments);
+    calculateAndSetScheduleDisplayData(updatedAssignments);
+  };
+
+  const handleCloseAddPersonPopup = () => {
+    setShowAddPersonPopup(false);
+    setPopupTargetSlotId(null);
+    setSelectedPersonForAdd('');
+    setAddPersonError('');
   };
 
 
@@ -752,7 +864,10 @@ function App() {
                 <ul className="list-none space-y-1 text-gray-700">
                   {teamMembers.map((member, index) => (
                     <li key={index} className="flex items-center justify-between p-2 bg-gray-100 rounded-md">
-                      <span className="font-medium">{member.name}</span>
+                      <span className="font-medium flex items-center">
+                        <span className="inline-block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: member.color }}></span>
+                        {member.name}
+                      </span>
                       <button
                         onClick={() => handleRemoveMember(member.name)}
                         className="ml-2 px-2 py-1 bg-red-500 hover:bg-red-600 text-white rounded-full text-xs font-bold"
@@ -803,6 +918,42 @@ function App() {
                     <span className="block sm:inline ml-2">{moveError}</span>
                 </div>
             )}
+            {/* Add Person Popup */}
+            {showAddPersonPopup && (
+                <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-xl w-80">
+                        <h3 className="text-xl font-semibold text-gray-800 mb-4">Assign Person to Slot</h3>
+                        <p className="text-gray-600 mb-3">
+                            Assign to: {allPossibleSlots.find(s => s.id === popupTargetSlotId)?.display} on {popupTargetSlotId.split('-')[0].charAt(0).toUpperCase() + popupTargetSlotId.split('-')[0].slice(1)}
+                        </p>
+                        <select
+                            className="w-full p-2 border border-gray-300 rounded-md mb-3"
+                            value={selectedPersonForAdd}
+                            onChange={(e) => setSelectedPersonForAdd(e.target.value)}
+                        >
+                            <option value="" disabled>Select a person</option>
+                            {teamMembers.map(member => (
+                                <option key={member.name} value={member.name}>{member.name}</option>
+                            ))}
+                        </select>
+                        {addPersonError && <p className="text-red-600 text-sm mb-3">{addPersonError}</p>}
+                        <div className="flex justify-end gap-2">
+                            <button
+                                onClick={handleCloseAddPersonPopup}
+                                className="px-4 py-2 bg-gray-300 text-gray-800 rounded-lg hover:bg-gray-400 transition duration-200"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleAddPersonToSlot}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-200"
+                            >
+                                Assign
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
 
             {/* Check if schedule.calendarData exists and has assignments */}
@@ -832,39 +983,70 @@ function App() {
                             const currentSlotId = `${day}-${timeId}`;
                             const isSelectedForMoveOrigin = memberToMove && memberToMove.fromSlotId === currentSlotId;
                             const isTargetSlot = memberToMove && !isSelectedForMoveOrigin; // Highlight potential target slots
+                            const isGloballyRestricted = globalRestrictedSlots.includes(currentSlotId);
 
                             return (
                                 <td
                                     key={currentSlotId}
-                                    className={`py-2 px-2 text-center border-l border-green-200 cursor-pointer
+                                    className={`py-2 px-2 text-center border-l border-green-200
                                         ${isSelectedForMoveOrigin ? 'bg-yellow-300 border-yellow-500' : ''}
-                                        ${isTargetSlot ? 'hover:bg-blue-200' : ''}
-                                        ${memberToMove ? 'cursor-pointer' : 'cursor-default'}
+                                        ${isTargetSlot ? 'hover:bg-blue-200 cursor-pointer' : (memberToMove ? 'cursor-not-allowed' : 'cursor-pointer')}
+                                        ${isGloballyRestricted ? 'bg-gray-300 text-gray-500 italic' : ''}
                                     `}
-                                    onClick={() => isTargetSlot && handleMoveToSlot(currentSlotId)}
+                                    onClick={() => {
+                                        if (memberToMove) {
+                                            handleMoveToSlot(currentSlotId);
+                                        } else if (!isGloballyRestricted) { // Only allow adding to non-restricted slots
+                                            handleCellClickForAdd(currentSlotId);
+                                        }
+                                    }}
                                 >
                                     {scheduleDisplayData.calendarData[day] && scheduleDisplayData.calendarData[day][timeId] && scheduleDisplayData.calendarData[day][timeId].length > 0 ? (
                                         <div className="flex flex-col gap-1">
-                                            {scheduleDisplayData.calendarData[day][timeId].map(assignedMemberName => (
-                                                <span key={assignedMemberName} className="block p-1 bg-green-300 text-green-900 rounded-md text-xs font-semibold">
-                                                    {assignedMemberName}
-                                                    <button
+                                            {scheduleDisplayData.calendarData[day][timeId].map(assignedMemberName => {
+                                                const memberColor = teamMembers.find(m => m.name === assignedMemberName)?.color || '#ccc'; // Default color
+                                                return (
+                                                    <span
+                                                        key={assignedMemberName}
+                                                        className="block p-1 rounded-md text-xs font-semibold flex items-center justify-between"
+                                                        style={{ backgroundColor: memberColor, color: '#333' }} // Apply color
                                                         onClick={(e) => {
                                                             e.stopPropagation(); // Prevent triggering cell click
-                                                            handleMoveStart(assignedMemberName, currentSlotId);
+                                                            handleRemovePersonFromSlot(assignedMemberName, currentSlotId);
                                                         }}
-                                                        className="ml-1 px-1 py-0.5 bg-green-500 hover:bg-green-600 text-white rounded-full text-xs"
-                                                        title="Move this person"
+                                                        title={`Remove ${assignedMemberName}`}
                                                     >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                                          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                                                        </svg>
-                                                    </button>
-                                                </span>
-                                            ))}
+                                                        {assignedMemberName}
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation(); // Prevent triggering cell click
+                                                                handleMoveStart(assignedMemberName, currentSlotId);
+                                                            }}
+                                                            className="ml-1 px-1 py-0.5 bg-green-500 hover:bg-green-600 text-white rounded-full text-xs"
+                                                            title="Move this person"
+                                                        >
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                                                            </svg>
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation(); // Prevent triggering cell click
+                                                                handleRemovePersonFromSlot(assignedMemberName, currentSlotId);
+                                                            }}
+                                                            className="ml-1 px-1 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded-full text-xs"
+                                                            title="Remove this person"
+                                                        >
+                                                            X
+                                                        </button>
+                                                    </span>
+                                                );
+                                            })}
                                         </div>
                                     ) : (
-                                        <span className="text-gray-400">-</span>
+                                        <span className="text-gray-400">
+                                            {isGloballyRestricted ? 'Restricted' : '-'}
+                                        </span>
                                     )}
                                 </td>
                             );
