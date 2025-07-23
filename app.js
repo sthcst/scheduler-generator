@@ -1,10 +1,16 @@
 // This is the React code for your app, now in its own file!
 
+// Added for debugging: Check if the app.js file is loaded
+console.log("app.js file loaded successfully.");
+
 // The 'React' and 'ReactDOM' objects are available globally because we loaded them
 // with <script> tags in the HTML file. So, we access useState as React.useState.
 
 // This is the main part of our app, like the central control panel.
 function App() {
+  // Added for debugging: Check if the App component starts rendering
+  console.log("App component started rendering.");
+
   // We'll use 'useState' (accessed via React.useState) to keep track of team members and their availability.
   // Think of it like a little notepad where we write down information that can change.
   const [teamMembers, setTeamMembers] = React.useState([]);
@@ -200,34 +206,94 @@ function App() {
 
   // Helper function to calculate display data from raw assignments
   const calculateAndSetScheduleDisplayData = React.useCallback((assignments) => {
-    const generatedCalendarData = {};
+    // This is the new structure for rowSpan rendering
+    const processedCalendarData = [];
     const daysOfWeek = ['mon', 'tue', 'wed', 'thu', 'fri'];
     const uniqueTimeDisplays = Array.from(new Set(allPossibleSlots.map(slot => slot.display)));
 
-    daysOfWeek.forEach(day => {
-        generatedCalendarData[day] = {};
-        uniqueTimeDisplays.forEach(timeDisplay => {
-            const timeId = allPossibleSlots.find(slot => slot.display === timeDisplay && slot.dayId === day)?.timeId;
-            if (timeId) {
-                generatedCalendarData[day][timeId] = [];
+    // This tracker will now store the remaining rowSpan for each column
+    const columnSpanTracker = {};
+    daysOfWeek.forEach(day => columnSpanTracker[day] = 0);
+
+
+    let hasAssignments = false; // Flag to check if any assignments exist
+
+    uniqueTimeDisplays.forEach(timeDisplay => {
+        const rowCells = []; // Cells for the current <tr>
+        const timeSlotsForThisDisplay = allPossibleSlots.filter(slot => slot.display === timeDisplay); // All slots for this specific time across days
+
+        daysOfWeek.forEach(day => {
+            if (columnSpanTracker[day] > 0) {
+                columnSpanTracker[day]--;
+                // If this column is currently spanned, we do NOT add a cell to rowCells
+                // This is the key change to prevent the SyntaxError
+                return; // Skip adding to rowCells, as it will be covered by rowSpan
             }
+
+            const currentSlot = timeSlotsForThisDisplay.find(slot => slot.dayId === day);
+            const currentSlotId = currentSlot ? currentSlot.id : null;
+
+            let cellContent = null;
+            let cellColor = null;
+            let cellIsRestricted = false;
+            let cellRowSpan = 1;
+            let cellIsEmpty = false;
+            let cellMembers = [];
+            let cellMember = null; // For single member span
+
+            if (currentSlotId && globalRestrictedSlots.includes(currentSlotId)) {
+                cellContent = 'Restricted';
+                cellIsRestricted = true;
+            } else if (currentSlotId && assignments[currentSlotId] && assignments[currentSlotId].length > 0) {
+                const assignedMembers = assignments[currentSlotId];
+                if (assignedMembers.length === 1) { // Only apply rowSpan for single assigned person
+                    const memberName = assignedMembers[0];
+                    const member = teamMembers.find(m => m.name === memberName);
+                    cellMember = memberName;
+                    cellColor = member?.color || '#ccc';
+
+                    // Calculate rowSpan for this single member
+                    let span = 1;
+                    let nextSlotIndex = allPossibleSlots.findIndex(s => s.id === currentSlotId) + 1;
+                    while (nextSlotIndex < allPossibleSlots.length) {
+                        const nextSlot = allPossibleSlots[nextSlotIndex];
+                        // Check if it's the same day, and the next slot is also assigned to ONLY this member
+                        if (nextSlot.dayId === day &&
+                            assignments[nextSlot.id] && assignments[nextSlot.id].length === 1 &&
+                            assignments[nextSlot.id][0] === memberName) {
+                            span++;
+                            nextSlotIndex++;
+                        } else {
+                            break;
+                        }
+                    }
+                    cellRowSpan = span;
+                    columnSpanTracker[day] = span - 1; // Mark subsequent cells to skip
+                } else {
+                    // Multiple people in one 30-min slot, no vertical spanning here
+                    cellMembers = assignedMembers;
+                }
+            } else {
+                cellContent = '-';
+                cellIsEmpty = true;
+            }
+
+            // Push cell data only if it's not a skipped cell
+            rowCells.push({
+                id: currentSlotId, // Store slot ID for click handlers
+                content: cellContent,
+                members: cellMembers, // For multiple members
+                member: cellMember, // For single member (spanned)
+                isRestricted: cellIsRestricted,
+                isEmpty: cellIsEmpty,
+                rowSpan: cellRowSpan,
+                color: cellColor,
+                day: day // Add day to cell data for rendering
+            });
         });
+        processedCalendarData.push({ timeDisplay, cells: rowCells });
     });
 
-    let hasAssignments = false;
-    for (const shiftId in assignments) {
-      if (assignments[shiftId].length > 0) {
-        const slot = allPossibleSlots.find(s => s.id === shiftId);
-        if (slot) {
-            const day = slot.dayId;
-            const timeId = slot.timeId;
-            if (generatedCalendarData[day] && generatedCalendarData[day][timeId]) {
-                generatedCalendarData[day][timeId] = assignments[shiftId];
-                hasAssignments = true;
-            }
-        }
-      }
-    }
 
     const hoursSummary = {};
     const consistentTimeSuggestions = {};
@@ -273,111 +339,135 @@ function App() {
     });
 
     setScheduleDisplayData({
-        calendarData: generatedCalendarData,
+        processedCalendarData: processedCalendarData, // This is the new one for rendering
         hoursSummary: hoursSummary,
         consistentTimeSuggestions: consistentTimeSuggestions,
-        hasAssignments: hasAssignments // Pass this flag
+        hasAssignments: hasAssignments, // Pass this flag
+        errorMessage: null // Clear any previous error messages
     });
 
-  }, [allPossibleSlots, teamMembers, maxHoursLimit]); // Dependencies for useCallback
+  }, [allPossibleSlots, teamMembers, maxHoursLimit, globalRestrictedSlots]); // Dependencies for useCallback
 
 
   // This is where the "smart brain" of our schedule generator lives!
   const generateSchedule = () => {
-    if (teamMembers.length === 0) {
-      setScheduleDisplayData(null);
-      return;
-    }
-
-    const assignments = {}; // Temporary assignments for this run
-    allPossibleSlots.forEach(slot => {
-        assignments[slot.id] = [];
-    });
-
-    const memberShiftCounts = {}; // Total 30-min slots assigned
-    const memberDailyAssignments = {}; // Tracks if a member has been assigned a slot on a given day
-    teamMembers.forEach(member => {
-      memberShiftCounts[member.name] = 0;
-      memberDailyAssignments[member.name] = { mon: false, tue: false, wed: false, thu: false, fri: false };
-    });
-
-    const parsedMaxHoursLimit = parseFloat(maxHoursLimit);
-
-    const membersWithParsedAvailability = teamMembers.map(member => ({
-      ...member,
-      parsedAvailability: member.availability
-        .toLowerCase()
-        .split(',')
-        .map(item => item.trim())
-        .filter(item => item !== '')
-        .filter(slotId => !globalRestrictedSlots.includes(slotId))
-    }));
-
-    // Iterate through all possible shifts (time slot by time slot)
-    allPossibleSlots.forEach(shift => {
-      if (globalRestrictedSlots.includes(shift.id)) {
-          return; // Skip this shift, it's restricted for everyone
+    try { // Added try-catch block here
+      if (teamMembers.length === 0) {
+        setScheduleDisplayData(null); // Or an empty state to show "No members" message
+        return;
       }
 
-      // Determine last assigned member for overlap logic if applicable
-      let lastAssignedMemberForOverlap = null;
-      if (requireOverlap && peoplePerShift === 1) {
-          const currentSlotIndex = allPossibleSlots.findIndex(s => s.id === shift.id);
-          if (currentSlotIndex > 0) {
-              const previousSlot = allPossibleSlots[currentSlotIndex - 1];
-              // Check if it's the same day and if the previous slot was assigned
-              if (previousSlot.dayId === shift.dayId && assignments[previousSlot.id] && assignments[previousSlot.id].length > 0) {
-                  lastAssignedMemberForOverlap = assignments[previousSlot.id][0];
-              }
-          }
-      }
+      const assignments = {}; // Temporary assignments for this run
+      allPossibleSlots.forEach(slot => {
+          assignments[slot.id] = [];
+      });
 
-      // Loop to assign 'peoplePerShift' number of people to the current slot
-      while (assignments[shift.id].length < peoplePerShift) {
-          const availableForShift = membersWithParsedAvailability.filter(member => {
-            const currentHours = memberShiftCounts[member.name] * 0.5;
-            return member.parsedAvailability.includes(shift.id) &&
-                   (currentHours + 0.5 <= parsedMaxHoursLimit) && // Strict max hours check
-                   !assignments[shift.id].includes(member.name); // Not already assigned to this specific slot
-          });
+      const memberShiftCounts = {}; // Total 30-min slots assigned
+      const memberDailyHours = {}; // New: Tracks hours assigned to a member on a specific day
+      const memberDailyAssignments = {}; // Tracks if a member has been assigned *any* slot on a given day
+      teamMembers.forEach(member => {
+        memberShiftCounts[member.name] = 0;
+        memberDailyAssignments[member.name] = { mon: false, tue: false, wed: false, thu: false, fri: false };
+        memberDailyHours[member.name] = { mon: 0, tue: 0, wed: 0, thu: 0, fri: 0 }; // Initialize daily hours
+      });
 
-          if (availableForShift.length > 0) {
-            availableForShift.sort((a, b) => {
-                // 1. Prioritize members who haven't worked this day yet (strongest preference)
-                const aWorkedToday = memberDailyAssignments[a.name][shift.dayId];
-                const bWorkedToday = memberDailyAssignments[b.name][shift.dayId];
+      const parsedMaxHoursLimit = parseFloat(maxHoursLimit);
 
-                if (!aWorkedToday && bWorkedToday) return -1; // a is better (hasn't worked today)
-                if (aWorkedToday && !bWorkedToday) return 1;  // b is better (hasn't worked today)
+      const membersWithParsedAvailability = teamMembers.map(member => ({
+        ...member,
+        parsedAvailability: member.availability
+          .toLowerCase()
+          .split(',')
+          .map(item => item.trim())
+          .filter(item => item !== '')
+          .filter(slotId => !globalRestrictedSlots.includes(slotId))
+      }));
 
-                // 2. Fairness: Prefer fewer total assigned shifts
-                const aCount = memberShiftCounts[a.name];
-                const bCount = memberShiftCounts[b.name];
-                if (aCount !== bCount) return aCount - bCount;
+      // Iterate through all possible shifts (time slot by time slot)
+      allPossibleSlots.forEach(shift => {
+        if (globalRestrictedSlots.includes(shift.id)) {
+            return; // Skip this shift, it's restricted for everyone
+        }
 
-                // 3. Overlap (if applicable, for single shifts): Penalize if just worked previous slot
-                if (requireOverlap && peoplePerShift === 1 && lastAssignedMemberForOverlap) {
-                    const aPenaltyOverlap = (a.name === lastAssignedMemberForOverlap) ? 100 : 0; // Large penalty to strongly discourage
-                    const bPenaltyOverlap = (b.name === lastAssignedMemberForOverlap) ? 100 : 0;
-                    if (aPenaltyOverlap !== bPenaltyOverlap) return aPenaltyOverlap - bPenaltyOverlap;
+        // Determine last assigned member(s) for overlap logic if applicable
+        let lastAssignedMembersForOverlap = [];
+        if (requireOverlap) { // Overlap logic applies regardless of peoplePerShift now
+            const currentSlotIndex = allPossibleSlots.findIndex(s => s.id === shift.id);
+            if (currentSlotIndex > 0) {
+                const previousSlot = allPossibleSlots[currentSlotIndex - 1];
+                // Check if it's the same day and if the previous slot was assigned
+                if (previousSlot.dayId === shift.dayId && assignments[previousSlot.id] && assignments[previousSlot.id].length > 0) {
+                    lastAssignedMembersForOverlap = assignments[previousSlot.id];
                 }
+            }
+        }
 
-                // 4. Random Tie-breaker: If all else is equal, randomize
-                return Math.random() - 0.5;
+        // Loop to assign 'peoplePerShift' number of people to the current slot
+        while (assignments[shift.id].length < peoplePerShift) {
+            const availableForShift = membersWithParsedAvailability.filter(member => {
+              const currentTotalHours = memberShiftCounts[member.name] * 0.5;
+              // Ensure they are available for this slot and won't exceed total hours
+              return member.parsedAvailability.includes(shift.id) &&
+                     (currentTotalHours + 0.5 <= parsedMaxHoursLimit) &&
+                     !assignments[shift.id].includes(member.name); // Not already assigned to this specific slot
             });
 
-            const assignedMember = availableForShift[0];
-            assignments[shift.id].push(assignedMember.name);
-            memberShiftCounts[assignedMember.name]++;
-            memberDailyAssignments[assignedMember.name][shift.dayId] = true; // Mark day as worked
-          } else {
-              break;
-          }
-      }
-    });
+            if (availableForShift.length > 0) {
+              availableForShift.sort((a, b) => {
+                  // 1. Prioritize members who haven't worked this day yet (strongest preference)
+                  const aWorkedToday = memberDailyAssignments[a.name][shift.dayId];
+                  const bWorkedToday = memberDailyAssignments[b.name][shift.dayId];
 
-    setCurrentAssignments(assignments); // Set the raw assignments to state
-    calculateAndSetScheduleDisplayData(assignments); // Calculate and set display data
+                  if (!aWorkedToday && bWorkedToday) return -1; // a is better (hasn't worked today)
+                  if (aWorkedToday && !bWorkedToday) return 1;  // b is better (hasn't worked today)
+
+                  // 2. Daily Fairness: Prefer fewer hours assigned on the current day
+                  const aDailyHours = memberDailyHours[a.name][shift.dayId];
+                  const bDailyHours = memberDailyHours[b.name][shift.dayId];
+                  if (aDailyHours !== bDailyHours) return aDailyHours - bDailyHours;
+
+                  // 3. Overlap Preference ("At least one new person"): Penalize if already in previous slot
+                  if (requireOverlap && lastAssignedMembersForOverlap.length > 0) {
+                      const aWasInPrevious = lastAssignedMembersForOverlap.includes(a.name);
+                      const bWasInPrevious = lastAssignedMembersForOverlap.includes(b.name);
+
+                      if (!aWasInPrevious && bWasInPrevious) return -1; // a is better (new person)
+                      if (aWasInPrevious && !bWasInPrevious) return 1;  // b is better (new person)
+                  }
+
+                  // 4. Overall Fairness: Prefer fewer total assigned shifts
+                  const aTotalCount = memberShiftCounts[a.name];
+                  const bTotalCount = memberShiftCounts[b.name];
+                  if (aTotalCount !== bTotalCount) return aTotalCount - bTotalCount;
+
+                  // 5. Random Tie-breaker: If all else is equal, randomize
+                  return Math.random() - 0.5;
+              });
+
+              const assignedMember = availableForShift[0];
+              assignments[shift.id].push(assignedMember.name);
+              memberShiftCounts[assignedMember.name]++;
+              memberDailyHours[assignedMember.name][shift.dayId] += 0.5; // Update daily hours
+              memberDailyAssignments[assignedMember.name][shift.dayId] = true; // Mark day as worked
+            } else {
+                break;
+            }
+        }
+      });
+
+      setCurrentAssignments(assignments); // Set the raw assignments to state
+      calculateAndSetScheduleDisplayData(assignments); // Calculate and set display data
+    } catch (error) {
+      console.error("Error generating schedule:", error);
+      setScheduleDisplayData({
+        calendarData: {},
+        processedCalendarData: [],
+        hoursSummary: {},
+        consistentTimeSuggestions: {},
+        hasAssignments: false,
+        errorMessage: "An error occurred during schedule generation. Please check console (F12) for details. Error: " + error.message // Display error message
+      });
+    }
   };
 
   // --- Manual Move Logic ---
@@ -772,10 +862,10 @@ function App() {
                 className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                 checked={requireOverlap}
                 onChange={(e) => setRequireOverlap(e.target.checked)}
-                disabled={peoplePerShift > 1} // Disable if more than 1 person per shift (overlap concept changes)
+                // Removed disabled={peoplePerShift > 1}
               />
               <label htmlFor="requireOverlap" className="ml-2 text-gray-700 text-sm font-medium">
-                Require 30-min Overlap Between Shifts (for 1 person/shift)
+                Require 30-min Overlap Between Shifts (at least one new person)
               </label>
             </div>
 
@@ -955,6 +1045,14 @@ function App() {
                 </div>
             )}
 
+            {/* Display error message if present */}
+            {scheduleDisplayData.errorMessage && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
+                    <strong className="font-bold">Error:</strong>
+                    <span className="block sm:inline ml-2">{scheduleDisplayData.errorMessage}</span>
+                </div>
+            )}
+
 
             {/* Check if schedule.calendarData exists and has assignments */}
             {scheduleDisplayData.hasAssignments ? (
@@ -969,88 +1067,108 @@ function App() {
                     </tr>
                   </thead>
                   <tbody className="text-gray-700 text-sm font-light">
-                    {/* Get unique time displays for rows */}
-                    {Array.from(new Set(allPossibleSlots.map(slot => slot.display))).map(timeDisplay => {
-                      // Find the corresponding timeId (e.g., '0900') for the current timeDisplay
-                      // We need to pick one, as all days will have the same time IDs
-                      const sampleSlot = allPossibleSlots.find(slot => slot.display === timeDisplay);
-                      const timeId = sampleSlot ? sampleSlot.id.split('-')[1] : null;
+                    {/* Iterate through the processedCalendarData for rendering rows */}
+                    {scheduleDisplayData.processedCalendarData.map((row, rowIndex) => (
+                        <tr key={rowIndex} className="border-b border-green-200 hover:bg-green-50">
+                            <td className="py-2 px-2 text-left font-medium whitespace-nowrap">{row.timeDisplay}</td>
+                            {row.cells.map((cell, cellIndex) => {
+                                // This is the crucial part that was causing the SyntaxError
+                                // We now guarantee that 'cell' is always a renderable object, no 'null' checks needed here
+                                // because 'calculateAndSetScheduleDisplayData' already filtered them out.
 
-                      return (
-                        <tr key={timeDisplay} className="border-b border-green-200 hover:bg-green-50">
-                          <td className="py-2 px-2 text-left font-medium whitespace-nowrap">{timeDisplay}</td> {/* Time label */}
-                          {['mon', 'tue', 'wed', 'thu', 'fri'].map(day => {
-                            const currentSlotId = `${day}-${timeId}`;
-                            const isSelectedForMoveOrigin = memberToMove && memberToMove.fromSlotId === currentSlotId;
-                            const isTargetSlot = memberToMove && !isSelectedForMoveOrigin; // Highlight potential target slots
-                            const isGloballyRestricted = globalRestrictedSlots.includes(currentSlotId);
+                                const currentSlotId = cell.id; // Use the ID stored in the cell data
+                                const isSelectedForMoveOrigin = memberToMove && memberToMove.fromSlotId === currentSlotId;
+                                const isTargetSlot = memberToMove && !isSelectedForMoveOrigin; // Highlight potential target slots
+                                const isGloballyRestricted = cell.isRestricted; // Use the flag from cellData
 
-                            return (
-                                <td
-                                    key={currentSlotId}
-                                    className={`py-2 px-2 text-center border-l border-green-200
-                                        ${isSelectedForMoveOrigin ? 'bg-yellow-300 border-yellow-500' : ''}
-                                        ${isTargetSlot ? 'hover:bg-blue-200 cursor-pointer' : (memberToMove ? 'cursor-not-allowed' : 'cursor-pointer')}
-                                        ${isGloballyRestricted ? 'bg-gray-300 text-gray-500 italic' : ''}
-                                    `}
-                                    onClick={() => {
-                                        if (memberToMove) {
-                                            handleMoveToSlot(currentSlotId);
-                                        } else if (!isGloballyRestricted) { // Only allow adding to non-restricted slots
-                                            handleCellClickForAdd(currentSlotId);
-                                        }
-                                    }}
-                                >
-                                    {scheduleDisplayData.calendarData[day] && scheduleDisplayData.calendarData[day][timeId] && scheduleDisplayData.calendarData[day][timeId].length > 0 ? (
-                                        <div className="flex flex-col gap-1">
-                                            {scheduleDisplayData.calendarData[day][timeId].map(assignedMemberName => {
-                                                const memberColor = teamMembers.find(m => m.name === assignedMemberName)?.color || '#ccc'; // Default color
-                                                return (
-                                                    <span
-                                                        key={assignedMemberName}
-                                                        className="block p-1 rounded-md text-xs font-semibold flex items-center justify-between"
-                                                        style={{ backgroundColor: memberColor, color: '#333' }} // Apply color
+                                return (
+                                    <td
+                                        key={`${cell.day}-${cell.id}-${cellIndex}`} // More robust key
+                                        rowSpan={cell.rowSpan || 1} // Apply rowSpan
+                                        className={`py-2 px-2 text-center border-l border-green-200
+                                            ${isSelectedForMoveOrigin ? 'bg-yellow-300 border-yellow-500' : ''}
+                                            ${isTargetSlot ? 'hover:bg-blue-200 cursor-pointer' : (memberToMove ? 'cursor-not-allowed' : 'cursor-pointer')}
+                                            ${isGloballyRestricted ? 'bg-gray-300 text-gray-500 italic' : ''}
+                                        `}
+                                        onClick={() => {
+                                            if (memberToMove) {
+                                                handleMoveToSlot(currentSlotId);
+                                            } else if (!isGloballyRestricted) { // Only allow adding to non-restricted slots
+                                                handleCellClickForAdd(currentSlotId);
+                                            }
+                                        }}
+                                    >
+                                        {cell.member ? ( // Single person assigned (potentially spanned)
+                                            <span
+                                                className="block p-1 rounded-md text-xs font-semibold flex items-center justify-between"
+                                                style={{ backgroundColor: cell.color, color: '#333' }}
+                                                title={`Remove ${cell.member}`}
+                                            >
+                                                {cell.member}
+                                                <div className="flex">
+                                                    <button
                                                         onClick={(e) => {
                                                             e.stopPropagation(); // Prevent triggering cell click
-                                                            handleRemovePersonFromSlot(assignedMemberName, currentSlotId);
+                                                            handleMoveStart(cell.member, cell.id); // Use cell.id for original slot
                                                         }}
-                                                        title={`Remove ${assignedMemberName}`}
+                                                        className="ml-1 px-1 py-0.5 bg-green-500 hover:bg-green-600 text-white rounded-full text-xs"
+                                                        title="Move this person"
                                                     >
-                                                        {assignedMemberName}
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation(); // Prevent triggering cell click
-                                                                handleMoveStart(assignedMemberName, currentSlotId);
-                                                            }}
-                                                            className="ml-1 px-1 py-0.5 bg-green-500 hover:bg-green-600 text-white rounded-full text-xs"
-                                                            title="Move this person"
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                                                        </svg>
+                                                    </button>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation(); // Prevent triggering cell click
+                                                            handleRemovePersonFromSlot(cell.member, cell.id); // Use cell.id for original slot
+                                                        }}
+                                                        className="ml-1 px-1 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded-full text-xs"
+                                                        title="Remove this person"
+                                                    >
+                                                        X
+                                                    </button>
+                                                </div>
+                                            </span>
+                                        ) : cell.members && cell.members.length > 0 ? ( // Multiple people assigned (no vertical span)
+                                            <div className="flex flex-col gap-1">
+                                                {cell.members.map(assignedMemberName => {
+                                                    const memberColor = teamMembers.find(m => m.name === assignedMemberName)?.color || '#ccc';
+                                                    return (
+                                                        <span
+                                                            key={assignedMemberName}
+                                                            className="block p-1 rounded-md text-xs font-semibold flex items-center justify-between"
+                                                            style={{ backgroundColor: memberColor, color: '#333' }}
+                                                            onClick={(e) => { e.stopPropagation(); handleRemovePersonFromSlot(assignedMemberName, cell.id); }}
+                                                            title={`Remove ${assignedMemberName}`}
                                                         >
-                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                                              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                                                            </svg>
-                                                        </button>
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation(); // Prevent triggering cell click
-                                                                handleRemovePersonFromSlot(assignedMemberName, currentSlotId);
-                                                            }}
-                                                            className="ml-1 px-1 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded-full text-xs"
-                                                            title="Remove this person"
-                                                        >
-                                                            X
-                                                        </button>
-                                                    </span>
-                                                );
-                                            })}
-                                        </div>
-                                    ) : (
-                                        <span className="text-gray-400">
-                                            {isGloballyRestricted ? 'Restricted' : '-'}
-                                        </span>
-                                    )}
-                                </td>
-                            );
-                          })}
+                                                            {assignedMemberName}
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); handleMoveStart(assignedMemberName, cell.id); }}
+                                                                className="ml-1 px-1 py-0.5 bg-green-500 hover:bg-green-600 text-white rounded-full text-xs"
+                                                                title="Move this person"
+                                                            >
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 inline-block" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
+                                                            </button>
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); handleRemovePersonFromSlot(assignedMemberName, cell.id); }}
+                                                                className="ml-1 px-1 py-0.5 bg-red-500 hover:bg-red-600 text-white rounded-full text-xs"
+                                                                title="Remove this person"
+                                                            >
+                                                                X
+                                                            </button>
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <span className="text-gray-400">
+                                                {cell.isRestricted ? 'Restricted' : '-'}
+                                            </span>
+                                        )}
+                                    </td>
+                                );
+                            })}
                         </tr>
                       );
                     })}
